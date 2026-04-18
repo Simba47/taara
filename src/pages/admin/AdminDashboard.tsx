@@ -162,12 +162,20 @@ function AddManagerModal({ adminId, onClose }: { adminId: string; onClose: () =>
         throw new Error(data?.error ?? "Failed to create manager. Please try again.");
       }
 
-      // Success — mark done so Enter key / re-submit doesn't fire again
+      // Send confirmation email via Supabase resend API
+      await supabase.auth.resend({
+        type: "signup",
+        email: email.toLowerCase().trim(),
+        options: {
+          emailRedirectTo: `${window.location.origin}/manager/login`,
+        },
+      });
+
+      // Success
       setDone(true);
       qc.invalidateQueries({ queryKey: ["admin-managers", adminId] });
-      toast({ title: "Manager created!", description: `${fullName} can now log in at /manager/login.` });
+      toast({ title: "Manager created!", description: `Confirmation email sent to ${email}. They must verify before logging in.` });
 
-      // Close after short delay so user sees the success state
       setTimeout(() => onClose(), 800);
     } catch (e: any) {
       setErr(e.message ?? "Something went wrong.");
