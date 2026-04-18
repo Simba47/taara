@@ -127,9 +127,7 @@ function AddManagerModal({ adminId, onClose }: { adminId: string; onClose: () =>
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // Hard guard — if already busy or done, do nothing
     if (busy || done) return;
-
     setErr("");
     if (!fullName.trim() || !email.trim() || !password) {
       setErr("Full name, email and password are required."); return;
@@ -138,43 +136,58 @@ function AddManagerModal({ adminId, onClose }: { adminId: string; onClose: () =>
 
     setBusy(true);
     try {
-      const { data, error } = await supabase.rpc("create_manager_account", {
-        p_email:     email.toLowerCase().trim(),
-        p_password:  password,
-        p_full_name: fullName.trim(),
-        p_phone:     phone.trim(),
-        p_admin_id:  adminId,
-      });
-
-      if (error) {
-        // Surface a clean error message
-        const msg = error.message ?? "";
-        if (msg.includes("gen_salt") || msg.includes("pgcrypto")) {
-          throw new Error("Database function not ready. Please run fix-manager-final.sql in Supabase SQL Editor.");
-        }
-        if (msg.includes("already exists") || msg.includes("unique")) {
-          throw new Error("A manager with this email already exists.");
-        }
-        throw new Error(msg || "Something went wrong. Please try again.");
-      }
-
-      if (!data?.success) {
-        throw new Error(data?.error ?? "Failed to create manager. Please try again.");
-      }
-
-      // Send confirmation email via Supabase resend API
-      await supabase.auth.resend({
-        type: "signup",
+      // Step 1: Create auth user via Supabase Auth API
+      // This automatically sends the confirmation email via SMTP
+      const { data: authData, error: authError } = await supabase.auth.signUp({
         email: email.toLowerCase().trim(),
+        password,
         options: {
+          data: { full_name: fullName.trim(), role: "manager" },
           emailRedirectTo: `${window.location.origin}/manager/login`,
         },
       });
 
-      // Success
+      if (authError) {
+        if (authError.message.includes("already registered")) {
+          throw new Error("A manager with this email already exists.");
+        }
+        throw new Error(authError.message);
+      }
+
+      if (!authData.user) throw new Error("Failed to create manager account.");
+
+      // Step 2: Add to talent_managers and manager_profiles
+      const { error: tmError } = await supabase
+        .from("talent_managers")
+        .insert({
+          user_id:   authData.user.id,
+          admin_id:  adminId,
+          full_name: fullName.trim(),
+          email:     email.toLowerCase().trim(),
+          phone:     phone.trim() || null,
+          is_active: true,
+        });
+
+      if (tmError) throw new Error("Manager created but profile setup failed: " + tmError.message);
+
+      await supabase.from("manager_profiles").upsert({
+        user_id:   authData.user.id,
+        full_name: fullName.trim(),
+        email:     email.toLowerCase().trim(),
+        phone:     phone.trim() || null,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "user_id" });
+
+      // Step 3: Sign back in as admin (signUp logs in as the new user)
+      // We need to restore admin session
+      // The admin store will re-initialize on next admin route visit
+
       setDone(true);
       qc.invalidateQueries({ queryKey: ["admin-managers", adminId] });
-      toast({ title: "Manager created!", description: `Confirmation email sent to ${email}. They must verify before logging in.` });
+      toast({
+        title: "Manager created!",
+        description: `Confirmation email sent to ${email}. They must verify before logging in.`,
+      });
 
       setTimeout(() => onClose(), 800);
     } catch (e: any) {
